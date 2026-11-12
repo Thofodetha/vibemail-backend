@@ -1,6 +1,8 @@
 # VibeMail Engine Contract
 
-Status: draft for review. Version 0.4, 2026-11-11.
+Status: draft for review. Version 0.5, 2026-11-12.
+
+Changes from 0.4: Row Level Security is now specified (4.6, decision 11) and the migrations are required to be idempotent. The Row Level Security known gap in section 7 is closed.
 
 Changes from 0.3: the stack now matches `CLAUDE.md`. Plain Vercel Functions replace Next.js route handlers; the Supabase JS client replaces Prisma and Better Auth; the app issues its own JWT Bearer tokens; Jest replaces Vitest; client routes live under `/api/v1` and the Pub/Sub webhook is at `/webhook/gmail`. The engine now owns the sign-in start endpoint, the user and Gmail-account tables, token encryption and CORS. The two sessions are split by branch and by directory. Section 8 records the decisions the owner confirmed on 2026-11-11.
 
@@ -159,7 +161,7 @@ Criteria are grouped by when they can be proven (section 6). The unit numbers re
 
 ### 2.2 After the gate: schema merge and live verification
 
-- [ ] **AC-16** The SQL files in `migrations/` create the tables in section 4 field for field (names, Postgres types, nullability, constraints, indexes), and the row types in `types/` match them.
+- [ ] **AC-16** The SQL files in `migrations/` create the tables in section 4 field for field (names, Postgres types, nullability, constraints, indexes), enable Row Level Security as specified in 4.6, and the row types in `types/` match them. Running the whole set a second time succeeds and changes nothing.
 - [ ] **AC-17** The migrations are applied, in filename order, to the Supabase database.
 - [ ] **AC-18** The Supabase-backed `AccountStore`, `TokenStore`, `MessageStore` and `SyncStateStore` in `src/db` pass the same store test suites as the in-memory ones, run live (`npm run test:integration`).
 - [ ] **AC-19** (unit 2, live) The OAuth flow completes against Google, the tokens in `gmail_accounts` are ciphertext (checked by querying the table), and a forced refresh persists the new tokens with no mismatch (stored tokens equal the tokens used on the following Gmail call).
@@ -490,7 +492,18 @@ One row per Gmail account. It holds the cursor the delta sync resumes from and t
 
 - The **schema session** owns `migrations/` (plain SQL, applied in filename order) and `types/` (the TypeScript row types for these tables). It never touches `src/db/`.
 - The **server logic session** owns `src/db/`, where the Supabase-backed stores live, and defines its own domain types in `src/types/`. It must not import from `types/` until the schema has merged.
-- Supabase's Data API exposes `public` tables by default. See the Row Level Security gap in section 7.
+- Supabase's Data API exposes `public` tables by default. 4.6 locks them down.
+- Every migration is idempotent (`create ... if not exists`, `drop policy if exists` before `create policy`, repeatable `revoke` / `grant`) and runs in its own transaction, so the whole set can be re-applied at any time.
+
+### 4.6 Row Level Security
+
+Applied by `migrations/0005_rls.sql`.
+
+- RLS is enabled on all four tables.
+- `anon` has no privileges on any of them.
+- `authenticated` may only `SELECT` its own rows: `users` where `id = auth.uid()`, and `messages` and `gmail_sync_state` where `user_id = auth.uid()`. It has no `INSERT`, `UPDATE` or `DELETE`, so every write goes through the app.
+- `gmail_accounts` has no grant and no policy for `authenticated`, so the encrypted tokens are never readable through the Data API.
+- The app uses the service-role key, which bypasses RLS and keeps its own grants. The policies are therefore dormant for the app. The app issues its own HS256 JWT (1.8), for which `auth.uid()` is null, so the policies only take effect for requests that carry a Supabase-compatible JWT. Per-user isolation in application code remains mandatory.
 
 ## 5. Interfaces both sessions code against
 
@@ -609,7 +622,7 @@ The seven units in `build_sequence.md` are built in order. Because the schema ma
 - Supabase Auth, Storage, Realtime
 - The IMAP provider (`src/providers/imap`) and a cron route (`api/cron`, `src/cron`). The scaffold has these directories, but nothing here specifies them.
 - **Known gap: watch renewal and catch-up sync.** Gmail stops pushing 7 days after a watch starts unless `users.watch` is called again, and it may drop notifications. With no renewal job, push sync silently stops about 7 days after sign-in; after that, rows are refreshed only when `GET /api/v1/messages` is called.
-- **Known gap: Row Level Security.** Supabase exposes `public` tables through its Data API by default, so until RLS (or a non-exposed schema) is added, every table is reachable with the project's public anon key. The Google tokens are ciphertext (1.9), so they leak nothing usable without `ENCRYPTION_KEY`, but message content and user emails are readable. The service-role key the app uses bypasses RLS and is unaffected.
+- Making the RLS policies in 4.6 active for browser clients: that needs a Supabase-compatible JWT (a change to 1.8), which is not part of v0.5.
 
 ## 8. Decisions
 
@@ -625,5 +638,6 @@ Confirmed by the owner on 2026-11-11. Changing any of them needs the owner's say
 8. **Ownership.** `tests/` and the root config, including the Vercel config with the `/webhook/gmail` rewrite, belong to the server logic session.
 9. **Migration mechanism.** Plain SQL in `migrations/`, applied in filename order by the schema session (for example with `psql` against the direct connection). The Supabase CLI was not chosen.
 10. **Branch parallelism.** The schema session may draft on its branch before the gate; only review and merge wait.
+11. **Row Level Security.** Confirmed by the owner on 2026-11-12. RLS is enabled on all four tables; `anon` gets nothing; `authenticated` gets read-only access to its own rows in `users`, `messages` and `gmail_sync_state` through `auth.uid()` policies and none to `gmail_accounts`; the service-role app is unaffected (4.6). The app's own JWT is not changed to be Supabase-compatible. The migrations are idempotent.
 
-Still undecided and out of scope for v0.4: the IMAP provider and a cron route (section 7), watch renewal and catch-up sync, and Row Level Security (both known gaps in section 7).
+Still undecided and out of scope for v0.5: the IMAP provider and a cron route (section 7), and watch renewal and catch-up sync (a known gap in section 7).

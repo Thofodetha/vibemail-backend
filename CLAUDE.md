@@ -79,9 +79,9 @@ Verify steps that need the live database run twice: against fakes first (server 
 
 ## Decisions and open items
 
-`CONTRACT.md` v0.4 matches this file, and its section 8 records ten decisions the owner confirmed on 2026-11-11 (webhook token auth, JWT in a URL fragment, list reads Gmail live, single-origin CORS, app-level AES-256-GCM, the two test scripts, ownership of `tests/` and root config, plain-SQL migrations, parallel schema drafting). Do not change them without the owner's say-so.
+`CONTRACT.md` v0.5 matches this file, and its section 8 records eleven decisions the owner confirmed on 2026-11-11 and 2026-11-12 (webhook token auth, JWT in a URL fragment, list reads Gmail live, single-origin CORS, app-level AES-256-GCM, the two test scripts, ownership of `tests/` and root config, plain-SQL migrations, parallel schema drafting, Row Level Security with idempotent migrations). Do not change them without the owner's say-so.
 
-Still undecided: `src/providers/imap` and `api/cron` exist in the scaffold but nothing specifies them; watch renewal and Row Level Security are known gaps (`CONTRACT.md` §7). Ask before building on any of these.
+Still undecided: `src/providers/imap` and `api/cron` exist in the scaffold but nothing specifies them; watch renewal is a known gap (`CONTRACT.md` §7). Ask before building on any of these.
 
 ## Gotchas
 

@@ -74,12 +74,12 @@ Verify steps that need the live database run twice: against fakes first (server 
 
 - Gmail is the source of truth. List, send and mark-read call Gmail, then upsert into the message table keyed `(accountId, gmailId)`. `isRead` is derived from the absence of the `UNREAD` label and set in one place so it can never disagree with `labelIds`.
 - Delta sync resumes from the **stored** history cursor, never from the `historyId` in a Pub/Sub notification. Renewing a Gmail watch returns a current `historyId`; it must not overwrite the stored cursor, or every change since the last sync is skipped.
-- Application code reaches Gmail, tokens, messages and sync state only through interfaces (`MailProvider`, `AccountStore`, `TokenStore`, `MessageStore`, `SyncStateStore`, `CONTRACT.md` §5.2). This is what lets the server logic session run entirely on fakes.
+- Application code reaches Gmail, tokens, messages and sync state only through interfaces (`ProviderAuth`, `MailProvider`, `AccountStore`, `TokenStore`, `MessageStore`, `SyncStateStore`, `CONTRACT.md` §5.2). This is what lets the server logic session run entirely on fakes. `ProviderAuth` and `MailProvider` live in `src/types/provider.ts` and are provider-agnostic: no vendor names or types, and opaque ids and cursors.
 - Send is not idempotent; a retried request can send twice.
 
 ## Decisions and open items
 
-`CONTRACT.md` v0.4 matches this file, and its section 8 records ten decisions the owner confirmed on 2026-11-11 (webhook token auth, JWT in a URL fragment, list reads Gmail live, single-origin CORS, app-level AES-256-GCM, the two test scripts, ownership of `tests/` and root config, plain-SQL migrations, parallel schema drafting). Do not change them without the owner's say-so.
+`CONTRACT.md` v0.5 matches this file, and its section 8 records ten decisions the owner confirmed on 2026-11-11 (webhook token auth, JWT in a URL fragment, list reads Gmail live, single-origin CORS, app-level AES-256-GCM, the two test scripts, ownership of `tests/` and root config, plain-SQL migrations, parallel schema drafting). Do not change them without the owner's say-so.
 
 Still undecided: `src/providers/imap` and `api/cron` exist in the scaffold but nothing specifies them; watch renewal and Row Level Security are known gaps (`CONTRACT.md` §7). Ask before building on any of these.
 

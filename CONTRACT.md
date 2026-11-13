@@ -1,8 +1,10 @@
 # VibeMail Engine Contract
 
-Status: draft for review. Version 0.4, 2026-11-11.
+Status: draft for review. Version 0.5, 2026-11-12.
 
-Changes from 0.3: the stack now matches `CLAUDE.md`. Plain Vercel Functions replace Next.js route handlers; the Supabase JS client replaces Prisma and Better Auth; the app issues its own JWT Bearer tokens; Jest replaces Vitest; client routes live under `/api/v1` and the Pub/Sub webhook is at `/webhook/gmail`. The engine now owns the sign-in start endpoint, the user and Gmail-account tables, token encryption and CORS. The two sessions are split by branch and by directory. Section 8 records the decisions the owner confirmed on 2026-11-11.
+Changes from 0.4: the provider abstraction (5.2) is now provider-agnostic and lives in `src/types/provider.ts`. It is split into `ProviderAuth` (sign-in and token operations, new) and `MailProvider` (mailbox operations). Gmail-flavoured names are replaced by neutral ones (`rawMime`, `setRead`, `watchChanges`, `listChanges`, opaque `SyncCursor`), the undefined `ProviderMessage` and `ParsedMessage` are one defined type, and the typed provider errors lose their `Gmail` prefix. The HTTP API and its `GMAIL_*` error codes are unchanged; in particular 3.4 stays read-only even though `setRead` can also mark a message unread.
+
+Changes from 0.3 (version 0.4): the stack now matches `CLAUDE.md`. Plain Vercel Functions replace Next.js route handlers; the Supabase JS client replaces Prisma and Better Auth; the app issues its own JWT Bearer tokens; Jest replaces Vitest; client routes live under `/api/v1` and the Pub/Sub webhook is at `/webhook/gmail`. The engine now owns the sign-in start endpoint, the user and Gmail-account tables, token encryption and CORS. The two sessions are split by branch and by directory. Section 8 records the decisions the owner confirmed on 2026-11-11.
 
 Earlier changes: 0.3 removed the daily cron route and the Row Level Security requirement. 0.2 moved the database to Supabase and added Pub/Sub push, the 50-message initial sync and the sync-state table.
 
@@ -141,7 +143,7 @@ Criteria are grouped by when they can be proven (section 6). The unit numbers re
 
 ### 2.1 Server logic session: proven against fakes, before the schema merges
 
-- [ ] **AC-1** (unit 1) The `MailProvider`, `AccountStore`, `TokenStore`, `MessageStore` and `SyncStateStore` interfaces in 5.2 compile under `tsc --noEmit` in strict mode and define every method listed there. Both the Gmail implementation and the fake implement `MailProvider`.
+- [ ] **AC-1** (unit 1) The `ProviderAuth`, `MailProvider`, `AccountStore`, `TokenStore`, `MessageStore` and `SyncStateStore` interfaces in 5.2 compile under `tsc --noEmit` in strict mode and define every method listed there, and `src/types/provider.ts` names no vendor and imports nothing. The Gmail implementation and the fake each implement `ProviderAuth` and `MailProvider` (the Gmail class from unit 2, the fake with the first tests).
 - [ ] **AC-2** (unit 2) The sign-in start and callback match 3.1: success stores the account and redirects with a JWT; every failure redirects to `${FRONTEND_URL}/login?error=<CODE>` using only the codes in that section. Tested against mocked Google token and userinfo endpoints.
 - [ ] **AC-3** (unit 2) Token handling: stored token values are AES-256-GCM ciphertext (a test asserts the stored string contains neither token); an expired access token is refreshed by the OAuth2 client and the `tokens` listener persists the result before the request finishes; a refresh event without a `refresh_token` keeps the stored one; a refresh failing with `invalid_grant` yields `GMAIL_REAUTH_REQUIRED`. A test asserts the stored tokens equal the client's final credentials.
 - [ ] **AC-4** (unit 2) JWT authentication matches 1.8: a missing, non-Bearer, malformed, wrongly signed, wrong-algorithm or expired token gets `401 UNAUTHENTICATED` on every protected route; the start and callback routes work without a token.
@@ -503,22 +505,40 @@ The server logic session defines its own plain TypeScript types for messages (ma
 ### 5.2 Interfaces
 
 ```ts
-// The provider abstraction. Bound to one account; uses the googleapis OAuth2 client (AC-3).
+// The provider abstraction. Source of truth: src/types/provider.ts (shown here without
+// the JSDoc). Provider-agnostic: MessageId, ThreadId, PageToken and SyncCursor are opaque
+// strings. The Gmail class implements both interfaces; it maps SyncCursor to Gmail's
+// historyId, `destination` to the Pub/Sub topic, and `rawMime` to base64url `raw`.
+type ProviderTokens = { accessToken: string; refreshToken?: string; expiresAt: Date };
+
+// Stateless; usable before any account exists. Redirect URI and scopes are implementation config.
+interface ProviderAuth {
+  getAuthorizationUrl(p: { state: string }): Promise<string>;
+  exchangeCode(p: { code: string }): Promise<{                            // throws CodeExchangeFailedError
+    tokens: ProviderTokens;                                               // refreshToken undefined if none issued
+    grantedScopes: string[];
+    identity: { subject: string; email: string };                         // from the verified identity assertion
+  }>;
+  refreshAccessToken(p: { refreshToken: string }): Promise<ProviderTokens>;  // throws ReauthRequiredError
+}
+
+// Bound to one account's credentials. Gmail: the googleapis OAuth2 client refreshes automatically (AC-3).
 interface MailProvider {
   listMessages(p: {
-    labelIds: string[]; q?: string; maxResults: number; pageToken?: string;
-  }): Promise<{ ids: string[]; nextPageToken: string | null; resultSizeEstimate: number }>;
-
-  getMessage(id: string): Promise<ProviderMessage | null>;                // null on 404
-  sendMessage(p: { raw: string; threadId?: string }): Promise<{ id: string; threadId: string }>;
-  markRead(id: string): Promise<void>;                                    // throws MESSAGE_NOT_FOUND
-
-  startWatch(p: { topicName: string }): Promise<{ historyId: string; expiration: Date }>;
-  listHistory(p: { startHistoryId: string; pageToken?: string }): Promise<{
-    events: { type: "added" | "deleted" | "labelsChanged"; id: string }[];
-    nextPageToken: string | null;
-    historyId: string;
-  }>;                                                                     // throws HistoryExpiredError on 404
+    labelIds: string[]; query?: string; maxResults: number; pageToken?: PageToken;
+  }): Promise<{ ids: MessageId[]; nextPageToken: PageToken | null; resultSizeEstimate: number }>;
+                                                                          // throws InvalidPageTokenError
+  getMessage(id: MessageId): Promise<ProviderMessage | null>;             // null when it does not exist
+  sendMessage(p: { rawMime: string; threadId?: ThreadId }): Promise<{ id: MessageId; threadId: ThreadId }>;
+                                                                          // throws ThreadNotFoundError
+  setRead(id: MessageId, isRead: boolean): Promise<void>;                 // throws MessageNotFoundError
+                                                                          // 3.4 only ever calls setRead(id, true)
+  watchChanges(p: { destination: string }): Promise<{ cursor: SyncCursor; expiresAt: Date }>;
+  listChanges(p: { since: SyncCursor; pageToken?: PageToken }): Promise<{
+    changes: { type: "added" | "deleted" | "labelsChanged"; id: MessageId }[];
+    nextPageToken: PageToken | null;
+    cursor: SyncCursor;
+  }>;                                                                     // throws CursorExpiredError
 }
 
 interface AccountStore {
@@ -537,7 +557,7 @@ interface TokenStore {
 
 interface MessageStore {
   // Atomic: all rows are written or none are. Upserts on (accountId, gmailId).
-  upsertMessages(ctx: { userId: string; accountId: string }, messages: ParsedMessage[]): Promise<StoredMessage[]>;  // same order as input
+  upsertMessages(ctx: { userId: string; accountId: string }, messages: ProviderMessage[]): Promise<StoredMessage[]>;  // same order as input
   deleteMessages(ctx: { accountId: string }, gmailIds: string[]): Promise<number>;                              // returns rows removed
 }
 
@@ -547,7 +567,9 @@ interface SyncStateStore {
 }
 ```
 
-`MailProvider` implementations throw typed errors from the catalog in 1.5 and section 3 (for example `GmailReauthRequiredError`, `GmailRateLimitedError`). Entry points translate them to the envelope in one shared function.
+`ProviderAuth` and `MailProvider` implementations throw provider-neutral typed errors: `ReauthRequiredError`, `ScopeInsufficientError`, `RateLimitedError`, `UpstreamError`, `CodeExchangeFailedError`, `InvalidPageTokenError`, `MessageNotFoundError`, `ThreadNotFoundError` and `CursorExpiredError`. The error classes are written with the first implementation (unit 2). Entry points translate them to the `GMAIL_*` and endpoint codes of 1.5 and section 3 in one shared function, so the HTTP error catalog is unchanged.
+
+`ProviderMessage` (defined in `src/types/provider.ts`) is the normalised message a provider's parser produces. It carries the fields of 4.3 except `id`, `account_id`, `user_id` and `synced_at`, with the provider's message id and cursor in `id` and `cursor` (stored as `gmail_id` and `history_id`). `isRead` and `labelIds` are set together by the parser, in one place.
 
 The Supabase JS client cannot run a multi-statement transaction, so `upsertMessages` must be a single bulk upsert statement for its atomicity guarantee to hold, and so must `deleteMessages`.
 

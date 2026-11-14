@@ -12,17 +12,16 @@ Node 20, TypeScript in strict mode, `googleapis`, the Supabase JS client, Jest w
 
 ## State of the repo
 
-Pre-implementation. Every directory under `api/`, `src/` and `tests/` is empty; the only real content is two planning documents and the toolchain config. Read these before writing code:
+Early implementation. Build unit 1 is done (`src/types/provider.ts`, with its conformance test in `tests/unit/provider.test.ts`); everything else under `api/` and `src/` is still empty. The other real content is two planning documents and the toolchain config. Read these before writing code:
 
 - `CONTRACT.md` — endpoint contracts with typed errors, the stored-message data model (each field mapped to its Gmail API source), acceptance criteria, and the build rules.
 - `build_sequence.md` — seven build units that must be done in order; a unit is finished only when its one-line verify step passes. `CONTRACT.md` §6.3 maps each unit to acceptance criteria.
 
 ## Commands
 
-There are no working scripts yet: `npm test` is npm's placeholder and exits 1. Installed tooling, none of it configured:
-
-- Typecheck: `npx tsc --noEmit` (TypeScript here is the `@typescript/typescript6` package aliased as `typescript`).
-- Tests: Jest 30 + ts-jest + supertest are installed but there is no jest config, so ts-jest has to be set up before any test runs. After that, a single test is `npx jest path/to/file.test.ts -t "test name"`. The contract (§6.3) defines two scripts that do not exist yet: `npm test` (fakes only, no network; the merge gate) and `npm run test:integration` (live Supabase).
+- Typecheck: `npx tsc --noEmit` (TypeScript here is the `@typescript/typescript6` package aliased as `typescript`). It covers `src/`, `api/` and `tests/`.
+- Tests: Jest 30 + ts-jest, configured in `jest.config.js` as two projects. `npm test` runs `tests/unit` (fakes only, no network or database; the merge gate). `npm run test:integration` runs `tests/integration` against live Supabase and exits 1 ("No tests found") until build unit 7 adds tests. A single test is `npx jest --selectProjects unit path/to/file.test.ts -t "test name"`.
+- Build: `npm run build` (`npx tsc`) emits to `dist/`, which is gitignored.
 - Local preview (build unit 6): `vercel` is a devDependency, so `npx vercel dev`.
 
 ## Layout
@@ -85,5 +84,6 @@ Still undecided: `src/providers/imap` and `api/cron` exist in the scaffold but n
 
 ## Gotchas
 
-- `tsconfig.json` sets `rootDir: ./src` but `include` also lists `api/**/*`. `tsc` fails with TS6059 as soon as any file exists under `api/` (reproduced on a scratch copy). Fix the config before adding the first entry point.
-- `.gitignore` ends with a literal `EOF` line, which ignores a file named `EOF`. `.env` is ignored.
+- `tsconfig.json` must keep `"rootDir": "."`. With `outDir` set and no `rootDir`, TypeScript 6 fails the emitting build with TS5011, and `tsc --noEmit` does not show it. A `rootDir` of `./src` fails with TS6059 once any file exists under `api/` or `tests/`.
+- TypeScript 6 includes no `@types` packages by default, so `tsconfig.json` lists `"types": ["node", "jest"]`. Add any other global-providing `@types` package there, or its globals will not typecheck.
+- `.env` is gitignored; `.env.example` is tracked.

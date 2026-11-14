@@ -11,7 +11,8 @@
     "db:push": "supabase db push",
     "db:types": "supabase gen types typescript --linked > types/database.ts",
     "build": "npx tsc",
-    "test": "jest --runInBand",
+    "test": "jest --selectProjects unit --runInBand",
+    "test:integration": "jest --selectProjects integration --runInBand",
     "dev": "ts-node src/index.ts"
   },
   "repository": {

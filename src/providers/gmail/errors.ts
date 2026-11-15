@@ -23,6 +23,23 @@ export function isInvalidGrant(error: unknown): boolean {
   );
 }
 
+/** The HTTP status of a failed Google call, if the error carries one (GaxiosError, or a plain object). */
+export function httpStatus(error: unknown): number | undefined {
+  if (typeof error !== "object" || error === null) return undefined;
+  const shape = error as {
+    status?: unknown;
+    code?: unknown;
+    response?: { status?: unknown };
+  };
+  for (const candidate of [shape.response?.status, shape.status, shape.code]) {
+    const value = typeof candidate === "string" ? Number(candidate) : candidate;
+    if (typeof value === "number" && Number.isInteger(value) && value >= 100 && value < 600) {
+      return value;
+    }
+  }
+  return undefined;
+}
+
 /** Maps a failure from a Google call to a provider-neutral typed error. */
 export function mapGoogleError(error: unknown): ProviderError {
   if (error instanceof ProviderError) return error;

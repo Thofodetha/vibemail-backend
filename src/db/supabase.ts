@@ -1,9 +1,16 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import type {
+  MessageContext,
+  MessageStore,
+  StoredMessage,
+} from "../types/message";
+import type { ProviderMessage } from "../types/provider";
+import type {
   AccountStore,
   SyncState,
   SyncStateStore,
 } from "../types/stores";
+import { fromRow, toUpsertRow, type MessageRow } from "./message-rows";
 import type { TokenRowStore } from "./token-store";
 
 // Supabase-backed stores (CONTRACT 4 and 5.2). Column names follow CONTRACT section 4. They are
@@ -199,5 +206,55 @@ export class SupabaseSyncStateStore implements SyncStateStore {
       { onConflict: "account_id" },
     );
     if (error) fail("save sync state", error);
+  }
+}
+
+export class SupabaseMessageStore implements MessageStore {
+  constructor(private readonly client: SupabaseClient) {}
+
+  /**
+   * One bulk upsert statement keyed `(account_id, gmail_id)`: PostgREST runs it as a single
+   * transaction, so either every row is written or none is. Duplicate ids in one batch would make
+   * Postgres reject the statement, so the last occurrence wins before sending.
+   */
+  async upsertMessages(
+    ctx: MessageContext,
+    messages: ProviderMessage[],
+  ): Promise<StoredMessage[]> {
+    if (messages.length === 0) return [];
+    const now = new Date();
+    const unique = new Map<string, ProviderMessage>();
+    for (const message of messages) unique.set(message.id, message);
+
+    const { data, error } = await this.client
+      .from("messages")
+      .upsert(
+        [...unique.values()].map((m) => toUpsertRow(ctx, m, now)),
+        { onConflict: "account_id,gmail_id" },
+      )
+      .select("*")
+      .returns<MessageRow[]>();
+    if (error) fail("upsert messages", error);
+
+    const byGmailId = new Map(data.map((row) => [row.gmail_id, row]));
+    return messages.map((message) => {
+      const row = byGmailId.get(message.id);
+      if (!row) throw new Error(`upsert messages: no row returned for ${message.id}`);
+      return fromRow(row);
+    });
+  }
+
+  async deleteMessages(
+    ctx: { accountId: string },
+    gmailIds: string[],
+  ): Promise<number> {
+    if (gmailIds.length === 0) return 0;
+    const { count, error } = await this.client
+      .from("messages")
+      .delete({ count: "exact" })
+      .eq("account_id", ctx.accountId)
+      .in("gmail_id", gmailIds);
+    if (error) fail("delete messages", error);
+    return count ?? 0;
   }
 }

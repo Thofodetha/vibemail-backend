@@ -4,6 +4,13 @@ import type {
   SyncState,
   SyncStateStore,
 } from "../types/stores";
+import type {
+  MessageContext,
+  MessageStore,
+  StoredMessage,
+} from "../types/message";
+import type { ProviderMessage } from "../types/provider";
+import { fromRow, toUpsertRow, type MessageRow } from "./message-rows";
 import type { TokenRowStore } from "./token-store";
 
 // In-memory implementations of the store interfaces. They back the unit tests and the
@@ -111,5 +118,57 @@ export class InMemorySyncStateStore implements SyncStateStore {
 
   async save(state: SyncState): Promise<void> {
     this.states.set(state.accountId, { ...state });
+  }
+}
+
+export class InMemoryMessageStore implements MessageStore {
+  private readonly rows = new Map<string, MessageRow>();
+
+  private static key(accountId: string, gmailId: string): string {
+    return `${accountId}\u0000${gmailId}`;
+  }
+
+  /** All-or-nothing, like the single bulk statement the Supabase store uses. */
+  async upsertMessages(
+    ctx: MessageContext,
+    messages: ProviderMessage[],
+  ): Promise<StoredMessage[]> {
+    const now = new Date();
+    const staged = new Map<string, MessageRow>();
+    const result: MessageRow[] = [];
+    for (const message of messages) {
+      const key = InMemoryMessageStore.key(ctx.accountId, message.id);
+      const previous = staged.get(key) ?? this.rows.get(key);
+      const row: MessageRow = {
+        ...toUpsertRow(ctx, message, now),
+        // An existing row keeps its id and creation time.
+        id: previous?.id ?? randomUUID(),
+        created_at: previous?.created_at ?? now.toISOString(),
+      };
+      staged.set(key, row);
+      result.push(row);
+    }
+    for (const [key, row] of staged) this.rows.set(key, row);
+    return result.map(fromRow);
+  }
+
+  async deleteMessages(
+    ctx: { accountId: string },
+    gmailIds: string[],
+  ): Promise<number> {
+    let removed = 0;
+    for (const gmailId of gmailIds) {
+      if (this.rows.delete(InMemoryMessageStore.key(ctx.accountId, gmailId))) {
+        removed += 1;
+      }
+    }
+    return removed;
+  }
+
+  /** Test helper: the stored messages for an account, oldest write first. */
+  all(accountId: string): StoredMessage[] {
+    return [...this.rows.values()]
+      .filter((row) => row.account_id === accountId)
+      .map(fromRow);
   }
 }

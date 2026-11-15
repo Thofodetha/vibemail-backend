@@ -1,6 +1,8 @@
 # VibeMail Engine Contract
 
-Status: draft for review. Version 0.6, 2026-11-14.
+Status: draft for review. Version 0.7, 2026-11-14.
+
+Changes from 0.6: the webhook (3.5) is specified more tightly to match the receiver. It answers only after the delta is stored (never before), accepts base64 as well as base64url and a numeric `historyId`, never moves the cursor backwards, and says how the full resync works. The expiry note now reflects Google's documentation ("typically at least a week, sometimes only hours").
 
 Changes from 0.5: sign-in now starts the mailbox watch right after the tokens are stored, best-effort (3.1 step 4), and the initial sync skips its watch step when sync state already exists (3.6 step 1). A returning account keeps its stored cursor. Section 7 records a new known gap: the `NOT NULL` token columns in 4.2 conflict with creating the account row before the tokens exist.
 
@@ -354,7 +356,7 @@ Called by a Pub/Sub push subscription, not by browsers. Not under `/api/v1`, and
 ```ts
 type PubSubPush = {
   message: {
-    data: string;                 // base64url JSON: { emailAddress: string; historyId: string }
+    data: string;                 // base64 or base64url JSON: { emailAddress: string; historyId: string | number }
     messageId: string;            // Pub/Sub id, unrelated to Gmail ids
     publishTime: string;
   };
@@ -364,13 +366,13 @@ type PubSubPush = {
 
 **Behaviour**
 
-1. Verify the token. Decode `message.data` into `{ emailAddress, historyId }`.
+1. Verify the token (constant-time; checked before anything else is read). Decode `message.data` into `{ emailAddress, historyId }`. Both base64 alphabets are accepted, and `historyId` may be a string or a number. It is validated and then ignored: nothing below uses it.
 2. Resolve the account through `AccountStore` by `emailAddress` (lowercased). None found: acknowledge and ignore.
 3. Load the account's `gmail_sync_state`. None found: acknowledge and ignore (no cursor to work from).
 4. Call `history.list` with `startHistoryId` = the **stored** cursor (not the notification's `historyId`), all four history types, following `nextPageToken` to the end.
 5. Reduce the history events to a net result: a message that was deleted anywhere in the range is deleted; every other message that was added or had labels added or removed is re-fetched (`messages.get`, `format=full`) and upserted. A re-fetch returning 404 counts as deleted.
-6. Apply the upserts and deletes, then set the stored cursor to the `historyId` returned by the last `history.list` page.
-7. If `history.list` returns 404 (cursor expired, usually after a week or more), run a full resync (3.6, steps 2 to 4 using a fresh watch) and reset the cursor.
+6. Apply the upserts and deletes, then set the stored cursor to the `historyId` returned by the last `history.list` page. The cursor never moves backwards: if another run has already advanced it past this one, the larger value is kept, and other changes to the sync-state row (such as a watch renewal) are preserved.
+7. If `history.list` returns 404 (cursor expired: Gmail keeps history for typically at least a week, but sometimes only a few hours), run a full resync and reset the cursor. The resync starts a fresh watch, stores the 50 most recent INBOX messages (3.6, steps 2 and 3), and only then replaces the cursor with the watch's, so a failed resync leaves the old cursor and the next notification retries. It answers as `processed` with `upserted` = the messages stored.
 
 The stored set after delta sync is therefore the initial 50 INBOX messages plus every message touched since, including messages outside INBOX such as SENT.
 

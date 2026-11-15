@@ -1,5 +1,12 @@
 import { google, type gmail_v1 } from "googleapis";
-import { CursorExpiredError, ProviderError, UpstreamError } from "../../types/errors";
+import {
+  BodyTooLargeError,
+  CursorExpiredError,
+  InvalidRecipientError,
+  ProviderError,
+  ThreadNotFoundError,
+  UpstreamError,
+} from "../../types/errors";
 import type { MailProvider, MessageId, ProviderMessage } from "../../types/provider";
 import type { TokenStore } from "../../types/stores";
 import {
@@ -48,6 +55,10 @@ export type GmailApi = {
         id: string;
         format: "full";
       }): Promise<{ data: gmail_v1.Schema$Message }>;
+      send(params: {
+        userId: string;
+        requestBody: { raw: string; threadId?: string };
+      }): Promise<{ data: { id?: string | null; threadId?: string | null } }>;
     };
   };
 };
@@ -64,6 +75,16 @@ export type DeltaMailProvider = Pick<MailProvider, "listChanges" | "getMessage">
 /** Everything the sync layer uses: initial sync, delta sync and full resync. */
 export type SyncMailProvider = ReadableMailProvider & DeltaMailProvider;
 
+/** What the send layer needs: send a message, then read it back. */
+export type ComposeMailProvider = Pick<MailProvider, "sendMessage" | "getMessage">;
+
+/** Gmail names the offending header in its 400 message: "Invalid To header". */
+function recipientField(error: unknown): "to" | "cc" | "bcc" | undefined {
+  const text = error instanceof Error ? error.message : "";
+  const match = /invalid (to|cc|bcc) header/i.exec(text);
+  return match ? (match[1]?.toLowerCase() as "to" | "cc" | "bcc") : undefined;
+}
+
 /** The four history event types, so label changes and deletions are reported as well as new mail. */
 const HISTORY_TYPES = ["messageAdded", "messageDeleted", "labelAdded", "labelRemoved"];
 
@@ -72,7 +93,7 @@ const HISTORY_TYPES = ["messageAdded", "messageDeleted", "labelAdded", "labelRem
  * Every call waits for any token refresh it triggered to be written to the store before returning,
  * so a request never finishes with a refreshed token that was not persisted.
  */
-export class GmailMailProvider implements SyncMailProvider {
+export class GmailMailProvider implements SyncMailProvider, ComposeMailProvider {
   constructor(
     private readonly gmail: GmailApi,
     private readonly persistence: TokenPersistence,
@@ -180,6 +201,55 @@ export class GmailMailProvider implements SyncMailProvider {
       for (const id of ids(record.labelsRemoved)) changes.push({ type: "labelsChanged", id });
     }
     return { changes, nextPageToken: data.nextPageToken ?? null, cursor: data.historyId };
+  }
+
+  /**
+   * Sends a complete RFC 5322 message as the signed-in user. Gmail wants it base64url-encoded in
+   * `raw`; that encoding is this provider's business, so callers pass the message as text.
+   * Not idempotent: a retried call can send twice.
+   *
+   * @throws ThreadNotFoundError (404), BodyTooLargeError (413), InvalidRecipientError (400)
+   */
+  async sendMessage(p: { rawMime: string; threadId?: string }): Promise<{
+    id: MessageId;
+    threadId: string;
+  }> {
+    let data: { id?: string | null; threadId?: string | null };
+    try {
+      ({ data } = await this.request(() =>
+        this.gmail.users.messages.send({
+          userId: "me",
+          requestBody: {
+            raw: Buffer.from(p.rawMime, "utf8").toString("base64url"),
+            ...(p.threadId === undefined ? {} : { threadId: p.threadId }),
+          },
+        }),
+      ));
+    } catch (error) {
+      // Only a plain upstream failure is reinterpreted: a revoked grant (also HTTP 400), a scope
+      // problem or throttling keep their own meaning.
+      if (error instanceof UpstreamError) {
+        const status = httpStatus(error.detail);
+        if (status === 404) {
+          throw new ThreadNotFoundError("the thread does not exist", error.detail);
+        }
+        if (status === 413) {
+          throw new BodyTooLargeError("the message is too large", error.detail);
+        }
+        if (status === 400) {
+          throw new InvalidRecipientError(
+            "Gmail rejected the message headers",
+            recipientField(error.detail),
+            error.detail,
+          );
+        }
+      }
+      throw error;
+    }
+    if (!data.id || !data.threadId) {
+      throw new UpstreamError("send response lacks an id or a threadId");
+    }
+    return { id: data.id, threadId: data.threadId };
   }
 
   async watchChanges(p: { destination: string }): Promise<{

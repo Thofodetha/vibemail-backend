@@ -4,8 +4,13 @@ import {
 } from "../../src/providers/gmail/provider";
 import type { TokenPersistence } from "../../src/providers/gmail/auth";
 import {
+  BodyTooLargeError,
   CursorExpiredError,
+  InvalidRecipientError,
+  RateLimitedError,
   ReauthRequiredError,
+  ScopeInsufficientError,
+  ThreadNotFoundError,
   UpstreamError,
 } from "../../src/types/errors";
 import { alternative, plain } from "./fixtures/gmail";
@@ -13,8 +18,9 @@ import { alternative, plain } from "./fixtures/gmail";
 type ListFn = GmailApi["users"]["messages"]["list"];
 type GetFn = GmailApi["users"]["messages"]["get"];
 type HistoryFn = GmailApi["users"]["history"]["list"];
+type SendFn = GmailApi["users"]["messages"]["send"];
 
-function api(parts: { list?: ListFn; get?: GetFn; history?: HistoryFn }): GmailApi {
+function api(parts: { list?: ListFn; get?: GetFn; history?: HistoryFn; send?: SendFn }): GmailApi {
   return {
     users: {
       watch: async () => ({ data: { historyId: "42", expiration: "1800000000000" } }),
@@ -35,6 +41,11 @@ function api(parts: { list?: ListFn; get?: GetFn; history?: HistoryFn }): GmailA
           parts.get ??
           (async () => {
             throw new Error("get not stubbed");
+          }),
+        send:
+          parts.send ??
+          (async () => {
+            throw new Error("send not stubbed");
           }),
       },
     },
@@ -319,5 +330,127 @@ describe("GmailMailProvider.listChanges", () => {
       noopPersistence,
     );
     await expect(provider.listChanges({ since: "1" })).rejects.toThrow(UpstreamError);
+  });
+});
+
+describe("GmailMailProvider.sendMessage", () => {
+  const raw = "From: me@example.com\r\nTo: you@example.com\r\nSubject: Hi\r\n\r\nbody\r\n";
+  const ok = async () => ({ data: { id: "sent-1", threadId: "thread-1" } });
+
+  function failing(status: number, message = "Gmail error", data: unknown = {}) {
+    return async () => {
+      throw Object.assign(new Error(message), { response: { status, data } });
+    };
+  }
+
+  it("sends the message base64url-encoded, as me, and returns the new ids", async () => {
+    const send = jest.fn<ReturnType<SendFn>, Parameters<SendFn>>(ok);
+    const provider = new GmailMailProvider(api({ send }), noopPersistence);
+
+    expect(await provider.sendMessage({ rawMime: raw })).toEqual({
+      id: "sent-1",
+      threadId: "thread-1",
+    });
+
+    const call = send.mock.calls[0]?.[0];
+    expect(call?.userId).toBe("me");
+    expect(call?.requestBody).not.toHaveProperty("threadId");
+    const encoded = call?.requestBody.raw ?? "";
+    expect(encoded).not.toMatch(/[+/=]/); // base64url, no padding
+    expect(Buffer.from(encoded, "base64url").toString("utf8")).toBe(raw);
+  });
+
+  it("includes the thread id when replying", async () => {
+    const send = jest.fn<ReturnType<SendFn>, Parameters<SendFn>>(ok);
+    const provider = new GmailMailProvider(api({ send }), noopPersistence);
+    await provider.sendMessage({ rawMime: raw, threadId: "thread-9" });
+    expect(send.mock.calls[0]?.[0].requestBody.threadId).toBe("thread-9");
+  });
+
+  it("keeps UTF-8 intact through the encoding", async () => {
+    const send = jest.fn<ReturnType<SendFn>, Parameters<SendFn>>(ok);
+    const provider = new GmailMailProvider(api({ send }), noopPersistence);
+    const text = "Subject: caf\u00e9 \ud83d\udc4b\r\n\r\n";
+    await provider.sendMessage({ rawMime: text });
+    const encoded = send.mock.calls[0]?.[0].requestBody.raw ?? "";
+    expect(Buffer.from(encoded, "base64url").toString("utf8")).toBe(text);
+  });
+
+  it("maps a missing thread (404) to ThreadNotFoundError", async () => {
+    const provider = new GmailMailProvider(api({ send: failing(404) }), noopPersistence);
+    await expect(provider.sendMessage({ rawMime: raw, threadId: "nope" })).rejects.toThrow(
+      ThreadNotFoundError,
+    );
+  });
+
+  it("maps 413 to BodyTooLargeError", async () => {
+    const provider = new GmailMailProvider(api({ send: failing(413) }), noopPersistence);
+    await expect(provider.sendMessage({ rawMime: raw })).rejects.toThrow(BodyTooLargeError);
+  });
+
+  it("maps a 400 to InvalidRecipientError, naming the header when Gmail does", async () => {
+    const named = new GmailMailProvider(
+      api({ send: failing(400, "Invalid To header") }),
+      noopPersistence,
+    );
+    const error = await named.sendMessage({ rawMime: raw }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(InvalidRecipientError);
+    expect((error as InvalidRecipientError).field).toBe("to");
+
+    const unnamed = new GmailMailProvider(api({ send: failing(400, "Bad request") }), noopPersistence);
+    const other = await unnamed.sendMessage({ rawMime: raw }).catch((e: unknown) => e);
+    expect(other).toBeInstanceOf(InvalidRecipientError);
+    expect((other as InvalidRecipientError).field).toBeUndefined();
+  });
+
+  it("does not mistake a revoked grant (also HTTP 400) for a bad recipient", async () => {
+    const provider = new GmailMailProvider(
+      api({ send: failing(400, "invalid_grant", { error: "invalid_grant" }) }),
+      noopPersistence,
+    );
+    await expect(provider.sendMessage({ rawMime: raw })).rejects.toThrow(ReauthRequiredError);
+  });
+
+  it("keeps scope and rate-limit failures as themselves", async () => {
+    const scope = new GmailMailProvider(
+      api({
+        send: failing(403, "forbidden", { error: { errors: [{ reason: "insufficientPermissions" }] } }),
+      }),
+      noopPersistence,
+    );
+    await expect(scope.sendMessage({ rawMime: raw })).rejects.toThrow(ScopeInsufficientError);
+
+    const limited = new GmailMailProvider(api({ send: failing(429) }), noopPersistence);
+    await expect(limited.sendMessage({ rawMime: raw })).rejects.toThrow(RateLimitedError);
+  });
+
+  it("treats other failures as UpstreamError and never retries", async () => {
+    const send = jest.fn(failing(503));
+    const provider = new GmailMailProvider(api({ send }), noopPersistence);
+    await expect(provider.sendMessage({ rawMime: raw })).rejects.toThrow(UpstreamError);
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects a response without ids", async () => {
+    const provider = new GmailMailProvider(
+      api({ send: async () => ({ data: { id: "x" } }) }),
+      noopPersistence,
+    );
+    await expect(provider.sendMessage({ rawMime: raw })).rejects.toThrow(UpstreamError);
+  });
+
+  it("waits for a refreshed token to be persisted before returning", async () => {
+    const order: string[] = [];
+    const provider = new GmailMailProvider(
+      api({
+        send: async () => {
+          order.push("send");
+          return { data: { id: "a", threadId: "b" } };
+        },
+      }),
+      { flush: async () => void order.push("flush") },
+    );
+    await provider.sendMessage({ rawMime: raw });
+    expect(order).toEqual(["send", "flush"]);
   });
 });

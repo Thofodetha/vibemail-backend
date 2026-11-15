@@ -1,6 +1,8 @@
 # VibeMail Engine Contract
 
-Status: draft for review. Version 0.7, 2026-11-14.
+Status: draft for review. Version 0.8, 2026-11-15.
+
+Changes from 0.7: the send layer (3.3) is specified more tightly to match its implementation. A send that succeeds but cannot be read back or stored is `PERSISTENCE_FAILED` with `sent: true`, so a client does not retry and send twice. Validation now says which header characters are refused and how `details.fields` is keyed, addresses are plain ASCII, and the body cap is stated in bytes.
 
 Changes from 0.6: the webhook (3.5) is specified more tightly to match the receiver. It answers only after the delta is stored (never before), accepts base64 as well as base64url and a numeric `historyId`, never moves the cursor backwards, and says how the full resync works. The expiry note now reflects Google's documentation ("typically at least a week, sometimes only hours").
 
@@ -288,17 +290,21 @@ type SendMessageRequest = {
 
 Validation rules:
 
-- `EmailAddress.email` must be a syntactically valid address. `name`, when present, must not contain CR or LF.
-- `threadId` and `inReplyTo` are all-or-nothing: either both or neither.
-- Failures here are `VALIDATION_FAILED` with `details.fields`.
+- `EmailAddress.email` must be a syntactically valid address: plain ASCII `local@domain.tld`. Internationalised addresses are not supported. `name`, when present, must not contain CR or LF.
+- `threadId` and `inReplyTo` are all-or-nothing: either both or neither. `references` needs `inReplyTo`. `inReplyTo` and `references` are accepted with or without angle brackets and sent with them.
+- Nothing bound for a message header may contain CR or LF. The builder checks this again, so a caller cannot inject headers (extra recipients, a forged `From`) by getting a line break past validation.
+- `bodyText` plus `bodyHtml` together may be at most 1,048,576 bytes of UTF-8, else `BODY_TOO_LARGE`. The request-size cap above is checked first, by the HTTP layer.
+- Failures here are `VALIDATION_FAILED` with `details.fields`, a map from each offending field (`to`, `to[1].email`, `subject`, `body`, `threadId`, ...) to what is wrong with it. Every problem found is listed, not only the first.
 
 **Behaviour**
 
 1. Build an RFC 2822 message. `From` is the signed-in account's email; non-ASCII subject and display names are RFC 2047 encoded; bodies are UTF-8. If both `bodyText` and `bodyHtml` are present the message is `multipart/alternative`.
 2. When replying, set `In-Reply-To` and `References` headers.
 3. base64url-encode the message and call `users.messages.send` with `raw` (and `threadId` when replying).
-4. Call `users.messages.get` (`format=full`) on the returned ID and upsert.
+4. Call `users.messages.get` (`format=full`) on the returned ID and upsert. This read-back is needed because the `send` response holds only the new message's `id` and `threadId`, and the stored row requires `historyId`, `internalDate` and the parsed headers.
 5. Return the stored row.
+
+The send is attempted exactly once. Nothing retries it.
 
 **Success: `201 Created`**
 
@@ -315,6 +321,7 @@ type SendMessageResponse = { message: StoredMessage };
 | `INVALID_RECIPIENT` | 400 | The request passed validation but Gmail rejected a recipient header (`400 invalidArgument`). `details.field` names `to`, `cc` or `bcc` when determinable. |
 | `BODY_TOO_LARGE` | 413 | Request body exceeds 1 MB, or Gmail rejected the message for size. |
 | `THREAD_NOT_FOUND` | 404 | Gmail returned 404 for the given `threadId`. |
+| `PERSISTENCE_FAILED` | 500 | Gmail accepted and **sent** the message, but reading it back or storing it failed (step 4). `details` is `{ "sent": true, "gmailId": "...", "threadId": "..." }`. The client must **not** retry: the message is already sent and `send` is not idempotent. The copy in Sent reaches the database through the delta sync (3.5), because Gmail pushes a notification for it. |
 
 ### 3.4 Mark as read
 

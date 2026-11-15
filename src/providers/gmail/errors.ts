@@ -1,6 +1,8 @@
 import {
   ProviderError,
+  RateLimitedError,
   ReauthRequiredError,
+  ScopeInsufficientError,
   UpstreamError,
 } from "../../types/errors";
 
@@ -40,6 +42,22 @@ export function httpStatus(error: unknown): number | undefined {
   return undefined;
 }
 
+/** The `reason` of the first error in a Gmail API error body (`insufficientPermissions`, `rateLimitExceeded`, ...). */
+function googleReason(error: unknown): string | undefined {
+  if (typeof error !== "object" || error === null) return undefined;
+  const shape = error as {
+    response?: { data?: { error?: { errors?: { reason?: unknown }[] } } };
+  };
+  const reason = shape.response?.data?.error?.errors?.[0]?.reason;
+  return typeof reason === "string" ? reason : undefined;
+}
+
+const RATE_LIMIT_REASONS = new Set([
+  "rateLimitExceeded",
+  "userRateLimitExceeded",
+  "dailyLimitExceeded",
+]);
+
 /** Maps a failure from a Google call to a provider-neutral typed error. */
 export function mapGoogleError(error: unknown): ProviderError {
   if (error instanceof ProviderError) return error;
@@ -48,6 +66,14 @@ export function mapGoogleError(error: unknown): ProviderError {
       "the refresh token was revoked or has expired",
       error,
     );
+  }
+  const status = httpStatus(error);
+  const reason = googleReason(error);
+  if (status === 403 && reason === "insufficientPermissions") {
+    return new ScopeInsufficientError("the granted scopes do not allow this call", error);
+  }
+  if (status === 429 || (status === 403 && reason && RATE_LIMIT_REASONS.has(reason))) {
+    return new RateLimitedError("Google is rate limiting this account", error);
   }
   return new UpstreamError("Google request failed", error);
 }

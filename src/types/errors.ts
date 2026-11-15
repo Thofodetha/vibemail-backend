@@ -27,3 +27,12 @@ export class MissingScopesError extends ProviderError {}
 
 /** Sign-in succeeded but the provider issued no refresh token. */
 export class NoRefreshTokenError extends ProviderError {}
+
+/** The stored history cursor is too old for the provider to replay: the caller must resync in full. */
+export class CursorExpiredError extends ProviderError {}
+
+/** The granted scopes no longer allow the call: the user must grant access again. */
+export class ScopeInsufficientError extends ProviderError {}
+
+/** The provider is throttling this account. Retrying later may succeed. */
+export class RateLimitedError extends ProviderError {}

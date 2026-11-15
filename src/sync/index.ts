@@ -21,7 +21,7 @@ export type InitialSyncResult =
   | { status: "already-completed" };
 
 /** Runs `fn` over `items` with at most `limit` in flight, returning results in input order. */
-async function mapWithConcurrency<T, R>(
+export async function mapWithConcurrency<T, R>(
   items: readonly T[],
   limit: number,
   fn: (item: T) => Promise<R>,
@@ -39,6 +39,64 @@ async function mapWithConcurrency<T, R>(
     Array.from({ length: Math.min(limit, items.length) }, () => worker()),
   );
   return results;
+}
+
+/**
+ * The 50 most recent INBOX messages, newest first: list ids following `pageToken` (each page asks
+ * only for the ids still missing, since Gmail may return fewer than asked while offering a next
+ * page), then fetch each in full. A message that vanished in between is skipped.
+ */
+async function fetchRecentInbox(
+  provider: ReadableMailProvider,
+): Promise<ProviderMessage[]> {
+  const ids: string[] = [];
+  let pageToken: string | undefined;
+  while (ids.length < INITIAL_SYNC_MESSAGE_LIMIT) {
+    const page = await provider.listMessages({
+      labelIds: ["INBOX"],
+      maxResults: INITIAL_SYNC_MESSAGE_LIMIT - ids.length,
+      pageToken,
+    });
+    ids.push(...page.ids);
+    if (page.nextPageToken === null) break;
+    pageToken = page.nextPageToken;
+  }
+  const fetched = await mapWithConcurrency(
+    ids.slice(0, INITIAL_SYNC_MESSAGE_LIMIT),
+    FETCH_CONCURRENCY,
+    (id) => provider.getMessage(id),
+  );
+  return fetched.filter((m): m is ProviderMessage => m !== null);
+}
+
+/**
+ * Full resync (CONTRACT 3.5 step 7), for when the stored history cursor has expired: start a fresh
+ * watch, store the 50 most recent INBOX messages, and only then replace the cursor with the watch's.
+ * The cursor changes last, so a failed resync leaves the old cursor and the next notification retries.
+ */
+export async function runFullResync(
+  deps: InitialSyncDeps,
+  ctx: MessageContext & { pubsubTopic: string },
+): Promise<{ stored: number }> {
+  const now = deps.now ?? (() => new Date());
+  const watch = await deps.provider.watchChanges({ destination: ctx.pubsubTopic });
+  const messages = await fetchRecentInbox(deps.provider);
+  if (messages.length > 0) {
+    await deps.messages.upsertMessages(
+      { userId: ctx.userId, accountId: ctx.accountId },
+      messages,
+    );
+  }
+  const existing = await deps.syncState.get(ctx.accountId);
+  await deps.syncState.save({
+    accountId: ctx.accountId,
+    userId: ctx.userId,
+    historyId: watch.cursor,
+    watchExpiration: watch.expiresAt,
+    initialSyncCompletedAt: now(),
+    lastDeltaAt: existing?.lastDeltaAt ?? null,
+  });
+  return { stored: messages.length };
 }
 
 /**
@@ -77,25 +135,7 @@ export async function runInitialSync(
     await deps.syncState.save(state);
   }
 
-  const ids: string[] = [];
-  let pageToken: string | undefined;
-  while (ids.length < INITIAL_SYNC_MESSAGE_LIMIT) {
-    const page = await deps.provider.listMessages({
-      labelIds: ["INBOX"],
-      maxResults: INITIAL_SYNC_MESSAGE_LIMIT - ids.length,
-      pageToken,
-    });
-    ids.push(...page.ids);
-    if (page.nextPageToken === null) break;
-    pageToken = page.nextPageToken;
-  }
-
-  const fetched = await mapWithConcurrency(
-    ids.slice(0, INITIAL_SYNC_MESSAGE_LIMIT),
-    FETCH_CONCURRENCY,
-    (id) => deps.provider.getMessage(id),
-  );
-  const messages = fetched.filter((m): m is ProviderMessage => m !== null);
+  const messages = await fetchRecentInbox(deps.provider);
 
   if (messages.length > 0) {
     await deps.messages.upsertMessages(

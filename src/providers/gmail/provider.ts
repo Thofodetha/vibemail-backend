@@ -1,5 +1,5 @@
 import { google, type gmail_v1 } from "googleapis";
-import { ProviderError } from "../../types/errors";
+import { CursorExpiredError, ProviderError, UpstreamError } from "../../types/errors";
 import type { MailProvider, MessageId, ProviderMessage } from "../../types/provider";
 import type { TokenStore } from "../../types/stores";
 import {
@@ -14,6 +14,21 @@ import { watchMailbox, type GmailWatchApi } from "./watch";
 /** The slice of the Gmail API client this provider uses. The real `google.gmail()` client satisfies it. */
 export type GmailApi = {
   users: GmailWatchApi["users"] & {
+    history: {
+      list(params: {
+        userId: string;
+        startHistoryId: string;
+        historyTypes?: string[];
+        pageToken?: string;
+        maxResults?: number;
+      }): Promise<{
+        data: {
+          history?: gmail_v1.Schema$History[];
+          nextPageToken?: string | null;
+          historyId?: string | null;
+        };
+      }>;
+    };
     messages: {
       list(params: {
         userId: string;
@@ -43,12 +58,21 @@ export type ReadableMailProvider = Pick<
   "listMessages" | "getMessage" | "watchChanges"
 >;
 
+/** What the delta sync needs: replay changes since a cursor, and re-fetch what changed. */
+export type DeltaMailProvider = Pick<MailProvider, "listChanges" | "getMessage">;
+
+/** Everything the sync layer uses: initial sync, delta sync and full resync. */
+export type SyncMailProvider = ReadableMailProvider & DeltaMailProvider;
+
+/** The four history event types, so label changes and deletions are reported as well as new mail. */
+const HISTORY_TYPES = ["messageAdded", "messageDeleted", "labelAdded", "labelRemoved"];
+
 /**
- * Gmail implementation of the read side of `MailProvider`, bound to one account's authorized client.
+ * Gmail implementation of `MailProvider` (read and change-feed sides), bound to one account's authorized client.
  * Every call waits for any token refresh it triggered to be written to the store before returning,
  * so a request never finishes with a refreshed token that was not persisted.
  */
-export class GmailMailProvider implements ReadableMailProvider {
+export class GmailMailProvider implements SyncMailProvider {
   constructor(
     private readonly gmail: GmailApi,
     private readonly persistence: TokenPersistence,
@@ -111,6 +135,51 @@ export class GmailMailProvider implements ReadableMailProvider {
       throw error;
     }
     return parseGmailMessage(data);
+  }
+
+  /**
+   * One page of `history.list` from `since`, flattened to message-level changes in history order.
+   * `cursor` is Gmail's current history position, to store once every page has been applied.
+   *
+   * @throws CursorExpiredError when Gmail answers 404: `since` is too old (usually a week or more,
+   *   sometimes only hours), so the caller must resync in full.
+   */
+  async listChanges(p: { since: string; pageToken?: string }): Promise<{
+    changes: { type: "added" | "deleted" | "labelsChanged"; id: MessageId }[];
+    nextPageToken: string | null;
+    cursor: string;
+  }> {
+    let data: Awaited<ReturnType<GmailApi["users"]["history"]["list"]>>["data"];
+    try {
+      ({ data } = await this.request(() =>
+        this.gmail.users.history.list({
+          userId: "me",
+          startHistoryId: p.since,
+          historyTypes: HISTORY_TYPES,
+          pageToken: p.pageToken,
+          maxResults: 500,
+        }),
+      ));
+    } catch (error) {
+      if (error instanceof ProviderError && httpStatus(error.detail) === 404) {
+        throw new CursorExpiredError("the stored history cursor is no longer valid", error.detail);
+      }
+      throw error;
+    }
+    if (!data.historyId) {
+      throw new UpstreamError("history response lacks a historyId");
+    }
+
+    const changes: { type: "added" | "deleted" | "labelsChanged"; id: MessageId }[] = [];
+    const ids = (messages: { message?: { id?: string | null } }[] | undefined) =>
+      (messages ?? []).flatMap((m) => (m.message?.id ? [m.message.id] : []));
+    for (const record of data.history ?? []) {
+      for (const id of ids(record.messagesAdded)) changes.push({ type: "added", id });
+      for (const id of ids(record.messagesDeleted)) changes.push({ type: "deleted", id });
+      for (const id of ids(record.labelsAdded)) changes.push({ type: "labelsChanged", id });
+      for (const id of ids(record.labelsRemoved)) changes.push({ type: "labelsChanged", id });
+    }
+    return { changes, nextPageToken: data.nextPageToken ?? null, cursor: data.historyId };
   }
 
   async watchChanges(p: { destination: string }): Promise<{

@@ -3,16 +3,28 @@ import {
   type GmailApi,
 } from "../../src/providers/gmail/provider";
 import type { TokenPersistence } from "../../src/providers/gmail/auth";
-import { ReauthRequiredError, UpstreamError } from "../../src/types/errors";
+import {
+  CursorExpiredError,
+  ReauthRequiredError,
+  UpstreamError,
+} from "../../src/types/errors";
 import { alternative, plain } from "./fixtures/gmail";
 
 type ListFn = GmailApi["users"]["messages"]["list"];
 type GetFn = GmailApi["users"]["messages"]["get"];
+type HistoryFn = GmailApi["users"]["history"]["list"];
 
-function api(parts: { list?: ListFn; get?: GetFn }): GmailApi {
+function api(parts: { list?: ListFn; get?: GetFn; history?: HistoryFn }): GmailApi {
   return {
     users: {
       watch: async () => ({ data: { historyId: "42", expiration: "1800000000000" } }),
+      history: {
+        list:
+          parts.history ??
+          (async () => {
+            throw new Error("history.list not stubbed");
+          }),
+      },
       messages: {
         list:
           parts.list ??
@@ -214,5 +226,98 @@ describe("GmailMailProvider.watchChanges", () => {
       cursor: "42",
       expiresAt: new Date(1_800_000_000_000),
     });
+  });
+});
+
+describe("GmailMailProvider.listChanges", () => {
+  const history = {
+    history: [
+      {
+        id: "201",
+        messagesAdded: [{ message: { id: "new-1" } }, { message: { id: "new-2" } }],
+      },
+      {
+        id: "202",
+        labelsAdded: [{ message: { id: "old-1" }, labelIds: ["STARRED"] }],
+        labelsRemoved: [{ message: { id: "old-2" }, labelIds: ["UNREAD"] }],
+      },
+      { id: "203", messagesDeleted: [{ message: { id: "gone-1" } }] },
+    ],
+    nextPageToken: "next",
+    historyId: "999",
+  };
+
+  it("asks for all four event types from the given cursor, 500 per page", async () => {
+    const list = jest.fn<ReturnType<HistoryFn>, Parameters<HistoryFn>>(async () => ({ data: history }));
+    const provider = new GmailMailProvider(api({ history: list }), noopPersistence);
+
+    await provider.listChanges({ since: "100", pageToken: "p1" });
+
+    expect(list).toHaveBeenCalledWith({
+      userId: "me",
+      startHistoryId: "100",
+      historyTypes: ["messageAdded", "messageDeleted", "labelAdded", "labelRemoved"],
+      pageToken: "p1",
+      maxResults: 500,
+    });
+  });
+
+  it("flattens history records to message-level changes, in history order", async () => {
+    const provider = new GmailMailProvider(api({ history: async () => ({ data: history }) }), noopPersistence);
+    expect(await provider.listChanges({ since: "100" })).toEqual({
+      changes: [
+        { type: "added", id: "new-1" },
+        { type: "added", id: "new-2" },
+        { type: "labelsChanged", id: "old-1" },
+        { type: "labelsChanged", id: "old-2" },
+        { type: "deleted", id: "gone-1" },
+      ],
+      nextPageToken: "next",
+      cursor: "999",
+    });
+  });
+
+  it("reports no changes and no next page when history is empty", async () => {
+    const provider = new GmailMailProvider(
+      api({ history: async () => ({ data: { historyId: "300" } }) }),
+      noopPersistence,
+    );
+    expect(await provider.listChanges({ since: "100" })).toEqual({
+      changes: [],
+      nextPageToken: null,
+      cursor: "300",
+    });
+  });
+
+  it("reports an expired cursor (404) so the caller can resync in full", async () => {
+    const provider = new GmailMailProvider(
+      api({
+        history: async () => {
+          throw { response: { status: 404 } };
+        },
+      }),
+      noopPersistence,
+    );
+    await expect(provider.listChanges({ since: "1" })).rejects.toThrow(CursorExpiredError);
+  });
+
+  it("does not mistake other failures for an expired cursor", async () => {
+    const provider = new GmailMailProvider(
+      api({
+        history: async () => {
+          throw { response: { status: 500 } };
+        },
+      }),
+      noopPersistence,
+    );
+    await expect(provider.listChanges({ since: "1" })).rejects.toThrow(UpstreamError);
+  });
+
+  it("rejects a response without a historyId", async () => {
+    const provider = new GmailMailProvider(
+      api({ history: async () => ({ data: { history: [] } }) }),
+      noopPersistence,
+    );
+    await expect(provider.listChanges({ since: "1" })).rejects.toThrow(UpstreamError);
   });
 });

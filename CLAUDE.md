@@ -12,7 +12,7 @@ Node 20, TypeScript in strict mode, `googleapis`, the Supabase JS client, Jest w
 
 ## State of the repo
 
-Early implementation. Build unit 1 is done (`src/types/provider.ts`, with its conformance test in `tests/unit/provider.test.ts`). Unit 2 is partly built against fakes: the Gmail auth layer (`src/providers/gmail/`: consent URL, code exchange, refresh, the `tokens` listener, watch, `completeSignIn`), AES-256-GCM token encryption and the stores (`src/db/`, with in-memory and Supabase versions). Still to do in unit 2: JWT, the state cookie and the callback's error mapping. The Supabase stores are untested until the schema merges. `api/` is still empty. The other real content is two planning documents and the toolchain config. Read these before writing code:
+Early implementation. Build unit 1 is done (`src/types/provider.ts`, with its conformance test in `tests/unit/provider.test.ts`). Unit 2 is partly built against fakes: the Gmail auth layer (`src/providers/gmail/`: consent URL, code exchange, refresh, the `tokens` listener, watch, `completeSignIn`), AES-256-GCM token encryption and the stores (`src/db/`, with in-memory and Supabase versions). Still to do in unit 2: JWT, the state cookie and the callback's error mapping. Unit 3's initial sync is built against fakes: `src/sync/index.ts` (`runInitialSync`), the Gmail message parser and read side of the provider (`src/providers/gmail/parse.ts`, `provider.ts`), and the message stores; the `GET /api/v1/messages` read path is still to do. The Supabase stores are untested until the schema merges. `api/` is still empty. The other real content is two planning documents and the toolchain config. Read these before writing code:
 
 - `CONTRACT.md` — endpoint contracts with typed errors, the stored-message data model (each field mapped to its Gmail API source), acceptance criteria, and the build rules.
 - `build_sequence.md` — seven build units that must be done in order; a unit is finished only when its one-line verify step passes. `CONTRACT.md` §6.3 maps each unit to acceptance criteria.
@@ -20,7 +20,7 @@ Early implementation. Build unit 1 is done (`src/types/provider.ts`, with its co
 ## Commands
 
 - Typecheck: `npx tsc --noEmit` (TypeScript here is the `@typescript/typescript6` package aliased as `typescript`). It covers `src/`, `api/` and `tests/`.
-- Tests: Jest 30 + ts-jest, configured in `jest.config.js` as two projects. `npm test` runs `tests/unit` (fakes only, no network or database; the merge gate). `npm run test:integration` runs `tests/integration` against live Supabase and exits 1 ("No tests found") until build unit 7 adds tests. A single test is `npx jest --selectProjects unit path/to/file.test.ts -t "test name"`.
+- Tests: Jest 30 + ts-jest, configured in `jest.config.js` as two projects. `npm test` runs `tests/unit` (fakes only, no network or database; the merge gate). `npm run test:integration` runs `tests/integration` against live Supabase and exits 1 ("No tests found") until build unit 7 adds tests. A single file or test is `npx jest path/to/file.test.ts --selectProjects unit -t "test name"`. Put the path **before** `--selectProjects`: the flag takes every following argument as a project name, so a path after it is swallowed and the whole suite runs.
 - Build: `npm run build` (`npx tsc`) emits to `dist/`, which is gitignored.
 - Local preview (build unit 6): `vercel` is a devDependency, so `npx vercel dev`.
 

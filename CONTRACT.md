@@ -393,7 +393,7 @@ Processing is idempotent: re-delivered or duplicated notifications upsert the sa
 Not an HTTP endpoint. Runs for an account with no completed initial sync: scheduled after a successful callback (3.1) whenever the account has none.
 
 1. If the account already has a `gmail_sync_state` row (sign-in started the watch, 3.1 step 4), skip this step. Otherwise call `users.watch` with `topicName = GOOGLE_PUBSUB_TOPIC` and no label filter. Save `gmail_sync_state` with `history_id` = the response `historyId`, `watch_expiration` from the response `expiration`, and `initial_sync_completed_at = null`.
-2. List the 50 most recent INBOX messages (`labelIds=INBOX`, `maxResults=50`).
+2. List the 50 most recent INBOX message ids (`labelIds=INBOX`), following `pageToken` until there are 50 ids or no more pages. Each page asks only for the ids still missing (`maxResults` = 50 minus the ids so far), because Gmail may return fewer ids than asked while still offering a next page. The history cursor is not touched by this routine: it stays what the watch returned.
 3. Fetch each with `format=full` (concurrency 10) and upsert them atomically.
 4. Set `initial_sync_completed_at` to now.
 

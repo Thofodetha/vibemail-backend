@@ -2,7 +2,9 @@ import { google, type gmail_v1 } from "googleapis";
 import {
   BodyTooLargeError,
   CursorExpiredError,
+  InvalidPageTokenError,
   InvalidRecipientError,
+  MessageNotFoundError,
   ProviderError,
   ThreadNotFoundError,
   UpstreamError,
@@ -59,6 +61,11 @@ export type GmailApi = {
         userId: string;
         requestBody: { raw: string; threadId?: string };
       }): Promise<{ data: { id?: string | null; threadId?: string | null } }>;
+      modify(params: {
+        userId: string;
+        id: string;
+        requestBody: { addLabelIds?: string[]; removeLabelIds?: string[] };
+      }): Promise<{ data: { id?: string | null } }>;
     };
   };
 };
@@ -78,6 +85,9 @@ export type SyncMailProvider = ReadableMailProvider & DeltaMailProvider;
 /** What the send layer needs: send a message, then read it back. */
 export type ComposeMailProvider = Pick<MailProvider, "sendMessage" | "getMessage">;
 
+/** What mark-as-read needs: change the read state, then read the message back. */
+export type ReadStateMailProvider = Pick<MailProvider, "setRead" | "getMessage">;
+
 /** Gmail names the offending header in its 400 message: "Invalid To header". */
 function recipientField(error: unknown): "to" | "cc" | "bcc" | undefined {
   const text = error instanceof Error ? error.message : "";
@@ -93,7 +103,7 @@ const HISTORY_TYPES = ["messageAdded", "messageDeleted", "labelAdded", "labelRem
  * Every call waits for any token refresh it triggered to be written to the store before returning,
  * so a request never finishes with a refreshed token that was not persisted.
  */
-export class GmailMailProvider implements SyncMailProvider, ComposeMailProvider {
+export class GmailMailProvider implements MailProvider {
   constructor(
     private readonly gmail: GmailApi,
     private readonly persistence: TokenPersistence,
@@ -126,15 +136,28 @@ export class GmailMailProvider implements SyncMailProvider, ComposeMailProvider 
     nextPageToken: string | null;
     resultSizeEstimate: number;
   }> {
-    const { data } = await this.request(() =>
-      this.gmail.users.messages.list({
-        userId: "me",
-        labelIds: p.labelIds,
-        q: p.query,
-        maxResults: p.maxResults,
-        pageToken: p.pageToken,
-      }),
-    );
+    let data: Awaited<ReturnType<GmailApi["users"]["messages"]["list"]>>["data"];
+    try {
+      ({ data } = await this.request(() =>
+        this.gmail.users.messages.list({
+          userId: "me",
+          labelIds: p.labelIds,
+          q: p.query,
+          maxResults: p.maxResults,
+          pageToken: p.pageToken,
+        }),
+      ));
+    } catch (error) {
+      // Gmail answers a pageToken it does not recognise with a plain 400.
+      if (
+        p.pageToken !== undefined &&
+        error instanceof UpstreamError &&
+        httpStatus(error.detail) === 400
+      ) {
+        throw new InvalidPageTokenError("the page token was rejected", error.detail);
+      }
+      throw error;
+    }
     return {
       ids: (data.messages ?? []).flatMap((m) => (m.id ? [m.id] : [])),
       nextPageToken: data.nextPageToken ?? null,
@@ -156,6 +179,28 @@ export class GmailMailProvider implements SyncMailProvider, ComposeMailProvider 
       throw error;
     }
     return parseGmailMessage(data);
+  }
+
+  /**
+   * Marks a message read (removes the UNREAD label) or unread (adds it). Idempotent.
+   *
+   * @throws MessageNotFoundError when Gmail answers 404
+   */
+  async setRead(id: MessageId, isRead: boolean): Promise<void> {
+    try {
+      await this.request(() =>
+        this.gmail.users.messages.modify({
+          userId: "me",
+          id,
+          requestBody: isRead ? { removeLabelIds: ["UNREAD"] } : { addLabelIds: ["UNREAD"] },
+        }),
+      );
+    } catch (error) {
+      if (error instanceof UpstreamError && httpStatus(error.detail) === 404) {
+        throw new MessageNotFoundError("the message does not exist", error.detail);
+      }
+      throw error;
+    }
   }
 
   /**

@@ -35,7 +35,15 @@ export class CursorExpiredError extends ProviderError {}
 export class ScopeInsufficientError extends ProviderError {}
 
 /** The provider is throttling this account. Retrying later may succeed. */
-export class RateLimitedError extends ProviderError {}
+export class RateLimitedError extends ProviderError {
+  /** Seconds the provider asked callers to wait, when it said. */
+  readonly retryAfterSeconds: number | undefined;
+
+  constructor(message: string, detail?: unknown, retryAfterSeconds?: number) {
+    super(message, detail);
+    this.retryAfterSeconds = retryAfterSeconds;
+  }
+}
 
 /** A request failed validation. `fields` maps each offending field to what is wrong with it. */
 export class ValidationError extends Error {
@@ -77,5 +85,25 @@ export class SentNotPersistedError extends ProviderError {
     super("the message was sent but could not be stored", detail);
     this.sentId = sentId;
     this.threadId = threadId;
+  }
+}
+
+/** The provider rejected a `pageToken` as invalid. */
+export class InvalidPageTokenError extends ProviderError {}
+
+/** The message does not exist (deleted, never existed, or belongs to another account). */
+export class MessageNotFoundError extends ProviderError {}
+
+/**
+ * The provider accepted a change but the copy in our database could not be written. Gmail is the
+ * source of truth and a later list or delta sync reconciles the row, so retrying is safe.
+ */
+export class PersistenceFailedError extends ProviderError {}
+
+/** The request carries no valid credentials: the Authorization header or its JWT is missing or bad. */
+export class UnauthenticatedError extends Error {
+  constructor(message = "authentication is required") {
+    super(message);
+    this.name = "UnauthenticatedError";
   }
 }

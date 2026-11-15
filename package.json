@@ -30,6 +30,7 @@
     "@supabase/supabase-js": "^2.119.0",
     "@types/jsonwebtoken": "^9.0.10",
     "@types/node": "^26.6.6",
+    "@vercel/functions": "^3.11.3",
     "googleapis": "^189.0.0",
     "jsonwebtoken": "^9.0.3",
     "ts-node": "^10.9.2",

@@ -71,3 +71,27 @@ describe("httpStatus and isInvalidGrant", () => {
     expect(isInvalidGrant(null)).toBe(false);
   });
 });
+
+describe("Retry-After", () => {
+  const limited = (headers: unknown) => ({ response: { status: 429, headers, data: {} } });
+
+  it("is read from a plain headers object", () => {
+    const error = mapGoogleError(limited({ "retry-after": "30" }));
+    expect(error).toBeInstanceOf(RateLimitedError);
+    expect((error as RateLimitedError).retryAfterSeconds).toBe(30);
+  });
+
+  it("is read from a Headers instance, rounding up", () => {
+    const error = mapGoogleError(limited(new Headers({ "Retry-After": "2.2" })));
+    expect((error as RateLimitedError).retryAfterSeconds).toBe(3);
+  });
+
+  it("is left undefined when absent or not a number of seconds", () => {
+    expect((mapGoogleError(limited({})) as RateLimitedError).retryAfterSeconds).toBeUndefined();
+    expect(
+      (mapGoogleError(limited({ "retry-after": "Wed, 21 Oct 2026 07:28:00 GMT" })) as RateLimitedError)
+        .retryAfterSeconds,
+    ).toBeUndefined();
+    expect((mapGoogleError(limited({ "retry-after": "-5" })) as RateLimitedError).retryAfterSeconds).toBeUndefined();
+  });
+});

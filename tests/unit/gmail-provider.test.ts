@@ -6,7 +6,9 @@ import type { TokenPersistence } from "../../src/providers/gmail/auth";
 import {
   BodyTooLargeError,
   CursorExpiredError,
+  InvalidPageTokenError,
   InvalidRecipientError,
+  MessageNotFoundError,
   RateLimitedError,
   ReauthRequiredError,
   ScopeInsufficientError,
@@ -19,8 +21,15 @@ type ListFn = GmailApi["users"]["messages"]["list"];
 type GetFn = GmailApi["users"]["messages"]["get"];
 type HistoryFn = GmailApi["users"]["history"]["list"];
 type SendFn = GmailApi["users"]["messages"]["send"];
+type ModifyFn = GmailApi["users"]["messages"]["modify"];
 
-function api(parts: { list?: ListFn; get?: GetFn; history?: HistoryFn; send?: SendFn }): GmailApi {
+function api(parts: {
+  list?: ListFn;
+  get?: GetFn;
+  history?: HistoryFn;
+  send?: SendFn;
+  modify?: ModifyFn;
+}): GmailApi {
   return {
     users: {
       watch: async () => ({ data: { historyId: "42", expiration: "1800000000000" } }),
@@ -46,6 +55,11 @@ function api(parts: { list?: ListFn; get?: GetFn; history?: HistoryFn; send?: Se
           parts.send ??
           (async () => {
             throw new Error("send not stubbed");
+          }),
+        modify:
+          parts.modify ??
+          (async () => {
+            throw new Error("modify not stubbed");
           }),
       },
     },
@@ -452,5 +466,85 @@ describe("GmailMailProvider.sendMessage", () => {
     );
     await provider.sendMessage({ rawMime: raw });
     expect(order).toEqual(["send", "flush"]);
+  });
+});
+
+describe("GmailMailProvider.setRead", () => {
+  const ok = async () => ({ data: { id: "m1" } });
+
+  it("marks read by removing the UNREAD label", async () => {
+    const modify = jest.fn<ReturnType<ModifyFn>, Parameters<ModifyFn>>(ok);
+    const provider = new GmailMailProvider(api({ modify }), noopPersistence);
+    await provider.setRead("m1", true);
+    expect(modify).toHaveBeenCalledWith({
+      userId: "me",
+      id: "m1",
+      requestBody: { removeLabelIds: ["UNREAD"] },
+    });
+  });
+
+  it("marks unread by adding the UNREAD label", async () => {
+    const modify = jest.fn<ReturnType<ModifyFn>, Parameters<ModifyFn>>(ok);
+    const provider = new GmailMailProvider(api({ modify }), noopPersistence);
+    await provider.setRead("m1", false);
+    expect(modify).toHaveBeenCalledWith({
+      userId: "me",
+      id: "m1",
+      requestBody: { addLabelIds: ["UNREAD"] },
+    });
+  });
+
+  it("maps 404 to MessageNotFoundError", async () => {
+    const provider = new GmailMailProvider(
+      api({
+        modify: async () => {
+          throw { response: { status: 404 } };
+        },
+      }),
+      noopPersistence,
+    );
+    await expect(provider.setRead("gone", true)).rejects.toThrow(MessageNotFoundError);
+  });
+
+  it("keeps other failures as themselves", async () => {
+    const provider = new GmailMailProvider(
+      api({
+        modify: async () => {
+          throw { response: { status: 500 } };
+        },
+      }),
+      noopPersistence,
+    );
+    await expect(provider.setRead("m1", true)).rejects.toThrow(UpstreamError);
+  });
+});
+
+describe("GmailMailProvider.listMessages page tokens", () => {
+  it("reports a rejected pageToken (400) as InvalidPageTokenError", async () => {
+    const provider = new GmailMailProvider(
+      api({
+        list: async () => {
+          throw { response: { status: 400 } };
+        },
+      }),
+      noopPersistence,
+    );
+    await expect(
+      provider.listMessages({ labelIds: ["INBOX"], maxResults: 5, pageToken: "garbage" }),
+    ).rejects.toThrow(InvalidPageTokenError);
+  });
+
+  it("does not blame a page token that was not sent", async () => {
+    const provider = new GmailMailProvider(
+      api({
+        list: async () => {
+          throw { response: { status: 400 } };
+        },
+      }),
+      noopPersistence,
+    );
+    await expect(provider.listMessages({ labelIds: ["INBOX"], maxResults: 5 })).rejects.toThrow(
+      UpstreamError,
+    );
   });
 });

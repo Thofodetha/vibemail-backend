@@ -52,6 +52,20 @@ function googleReason(error: unknown): string | undefined {
   return typeof reason === "string" ? reason : undefined;
 }
 
+/** Seconds from a `Retry-After` header, as a plain object or a `Headers`. Only the delta-seconds form is read. */
+function retryAfterSeconds(error: unknown): number | undefined {
+  if (typeof error !== "object" || error === null) return undefined;
+  const headers = (error as { response?: { headers?: unknown } }).response?.headers;
+  let raw: unknown;
+  if (headers && typeof (headers as { get?: unknown }).get === "function") {
+    raw = (headers as { get(name: string): unknown }).get("retry-after");
+  } else if (typeof headers === "object" && headers !== null) {
+    raw = (headers as Record<string, unknown>)["retry-after"];
+  }
+  const seconds = typeof raw === "string" || typeof raw === "number" ? Number(raw) : NaN;
+  return Number.isFinite(seconds) && seconds >= 0 ? Math.ceil(seconds) : undefined;
+}
+
 const RATE_LIMIT_REASONS = new Set([
   "rateLimitExceeded",
   "userRateLimitExceeded",
@@ -73,7 +87,11 @@ export function mapGoogleError(error: unknown): ProviderError {
     return new ScopeInsufficientError("the granted scopes do not allow this call", error);
   }
   if (status === 429 || (status === 403 && reason && RATE_LIMIT_REASONS.has(reason))) {
-    return new RateLimitedError("Google is rate limiting this account", error);
+    return new RateLimitedError(
+      "Google is rate limiting this account",
+      error,
+      retryAfterSeconds(error),
+    );
   }
   return new UpstreamError("Google request failed", error);
 }

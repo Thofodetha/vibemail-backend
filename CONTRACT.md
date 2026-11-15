@@ -1,6 +1,8 @@
 # VibeMail Engine Contract
 
-Status: draft for review. Version 0.8, 2026-11-15.
+Status: draft for review. Version 0.9, 2026-11-15.
+
+Changes from 0.8: the routes are wired as Vercel Functions in `api/`. New shared error `METHOD_NOT_ALLOWED` (405, with an `Allow` header) for any method a route does not accept. CORS headers and `Vary: Origin` are on every `/api/v1` response including the sign-in routes, and `OPTIONS` is answered `204` on all of them. The webhook function lives at `api/webhook/gmail.ts` and is served at `/webhook/gmail` through a `vercel.json` rewrite. The mark-as-read route is `POST` (not `PATCH`) and sign-in start is `GET /api/v1/auth/google`, as 3.1 and 3.4 already said. A page token Gmail rejects is `INVALID_PAGE_TOKEN` only when a `pageToken` was sent. The local-preview fake mode is described in 6.3.
 
 Changes from 0.7: the send layer (3.3) is specified more tightly to match its implementation. A send that succeeds but cannot be read back or stored is `PERSISTENCE_FAILED` with `sent: true`, so a client does not retry and send twice. Validation now says which header characters are refused and how `details.fields` is keyed, addresses are plain ASCII, and the body cap is stated in bytes.
 
@@ -67,7 +69,7 @@ type ErrorResponse = {
 
 ### 1.5 Shared errors
 
-Every JWT-authenticated JSON endpoint (3.2, 3.3, 3.4) can return these in addition to its own. The webhook uses the same Gmail-derived codes where noted.
+Every JWT-authenticated JSON endpoint (3.2, 3.3, 3.4) can return these in addition to its own. The webhook uses the same Gmail-derived codes where noted. `METHOD_NOT_ALLOWED` applies to every route.
 
 | Code | HTTP | Trigger |
 |---|---|---|
@@ -77,7 +79,8 @@ Every JWT-authenticated JSON endpoint (3.2, 3.3, 3.4) can return these in additi
 | `VALIDATION_FAILED` | 400 | Request failed validation. `details.fields` maps field path to message. |
 | `GMAIL_RATE_LIMITED` | 429 | Gmail returned 429, or 403 with reason `rateLimitExceeded` / `userRateLimitExceeded`. `retryAfterSeconds` is set when Gmail supplied `Retry-After`. |
 | `GMAIL_UPSTREAM_ERROR` | 502 | Gmail returned 5xx, the network failed, or Gmail returned an unmapped 4xx. `details.gmailStatus` holds the upstream status when there was one. |
-| `INTERNAL` | 500 | Any other unexpected server error. |
+| `INTERNAL` | 500 | Any other unexpected server error, including a misconfigured deployment. The response never names the cause. |
+| `METHOD_NOT_ALLOWED` | 405 | The route does not accept this HTTP method. The `Allow` header lists the ones it does (and `OPTIONS` on `/api/v1` routes). |
 
 ### 1.6 IDs
 
@@ -130,7 +133,7 @@ type StoredMessage = {
 
 **Which routes.** The sign-in start and the callback (3.1) require no JWT. The webhook (3.5) is not a user endpoint and uses its own check. Everything else requires the Bearer token. After verifying the JWT, the engine loads the user's Gmail account (one per user); none found is `GMAIL_REAUTH_REQUIRED`.
 
-**CORS.** The frontend is a separate origin (`FRONTEND_URL`). Every `/api/v1` response carries `Access-Control-Allow-Origin: <FRONTEND_URL>`, `Access-Control-Allow-Headers: Authorization, Content-Type` and `Access-Control-Allow-Methods: GET, POST, OPTIONS`. `OPTIONS` requests are answered `204` without authentication. No other origin is allowed.
+**CORS.** The frontend is a separate origin (`FRONTEND_URL`). Every `/api/v1` response carries `Access-Control-Allow-Origin: <FRONTEND_URL>`, `Access-Control-Allow-Headers: Authorization, Content-Type` and `Access-Control-Allow-Methods: GET, POST, OPTIONS`. `Vary: Origin` is set too. This covers every `/api/v1` route, the sign-in start and callback included. `OPTIONS` requests are answered `204` without authentication. No other origin is allowed. The webhook is not a browser endpoint and carries no CORS headers.
 
 ### 1.9 Token encryption
 
@@ -264,7 +267,7 @@ This endpoint never reads or changes the sync cursor. A message that disappears 
 
 | Code | HTTP | Trigger |
 |---|---|---|
-| `INVALID_PAGE_TOKEN` | 400 | Gmail rejected `pageToken` as invalid. |
+| `INVALID_PAGE_TOKEN` | 400 | Gmail rejected `pageToken` as invalid (it answers a 400). Only reported when a `pageToken` was sent. |
 
 ### 3.3 Message send
 
@@ -354,7 +357,7 @@ type MarkReadResponse = { message: StoredMessage };   // message.isRead === true
 
 `POST /webhook/gmail`
 
-Called by a Pub/Sub push subscription, not by browsers. Not under `/api/v1`, and not a JWT route.
+Called by a Pub/Sub push subscription, not by browsers. Not under `/api/v1`, and not a JWT route. The function is `api/webhook/gmail.ts`; Vercel serves files under `api/` at `/api/...`, so a `vercel.json` rewrite maps the public `/webhook/gmail` (the URL the push subscription is given) to it.
 
 **Authentication.** The push subscription's endpoint carries `?token=<GOOGLE_PUBSUB_VERIFICATION_TOKEN>` (1.3). The receiver compares it to the environment value in constant time. A missing or different token is `WEBHOOK_UNAUTHORIZED`, and nothing else is read from the request.
 
@@ -626,7 +629,7 @@ The seven units in `build_sequence.md` are built in order. Because the schema ma
 
 **Test scripts.** `npm test` runs the fake-backed suites and is the merge gate. `npm run test:integration` runs the live-Supabase suites. Unit 7's "full test suite" is both. The server logic session adds these scripts.
 
-**Composition root.** The server logic session provides one module that wires the app's dependencies. Setting `VIBEMAIL_FAKES=1` selects the fake provider and in-memory stores, so the four core endpoints can run in a local preview without Google or a database (AC-10). Without it the module wires the real Gmail provider and the Supabase-backed stores. Production builds refuse to start with `VIBEMAIL_FAKES` set.
+**Composition root.** The server logic session provides one module that wires the app's dependencies. Setting `VIBEMAIL_FAKES=1` selects the fake provider and in-memory stores, so the four core endpoints can run in a local preview without Google or a database (AC-10). Without it the module wires the real Gmail provider and the Supabase-backed stores. Production builds refuse to start with `VIBEMAIL_FAKES` set (`VERCEL_ENV` or `NODE_ENV` is `production`). In fake mode the sign-in start redirects straight back to the callback with a fixed fake code, the mailbox is `demo@vibemail.test` with 60 demo messages, and only `JWT_SECRET` and `FRONTEND_URL` are required. The fake state lives in the function's memory, so it resets on a cold start.
 
 ## 7. Out of scope for v0.4
 

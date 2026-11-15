@@ -1,6 +1,8 @@
 # VibeMail Engine Contract
 
-Status: draft for review. Version 0.5, 2026-11-12.
+Status: draft for review. Version 0.6, 2026-11-14.
+
+Changes from 0.5: sign-in now starts the mailbox watch right after the tokens are stored, best-effort (3.1 step 4), and the initial sync skips its watch step when sync state already exists (3.6 step 1). A returning account keeps its stored cursor. Section 7 records a new known gap: the `NOT NULL` token columns in 4.2 conflict with creating the account row before the tokens exist.
 
 Changes from 0.4: the provider abstraction (5.2) is now provider-agnostic and lives in `src/types/provider.ts`. It is split into `ProviderAuth` (sign-in and token operations, new) and `MailProvider` (mailbox operations). Gmail-flavoured names are replaced by neutral ones (`rawMime`, `setRead`, `watchChanges`, `listChanges`, opaque `SyncCursor`), the undefined `ProviderMessage` and `ParsedMessage` are one defined type, and the typed provider errors lose their `Gmail` prefix. The HTTP API and its `GMAIL_*` error codes are unchanged; in particular 3.4 stays read-only even though `setRead` can also mark a message unread.
 
@@ -206,6 +208,7 @@ Creates a random `state` value, stores it in an `HttpOnly`, `SameSite=Lax`, `Sec
 2. Exchange `code` for tokens with the OAuth2 client. Verify the ID token and read `sub` and `email`.
 3. Check the granted scopes and that a refresh token came back.
 4. Upsert the user (by email, stored lowercase) and the Gmail account (by `google_sub`) through `AccountStore`; save the tokens through `TokenStore` (encrypted).
+   Then start the mailbox watch (`users.watch`, topic `GOOGLE_PUBSUB_TOPIC`, no label filter) and record it in `gmail_sync_state`. This is best-effort: if it fails, the failure is logged, the account and tokens are kept, and sign-in continues; the initial sync (3.6) starts the watch again. A new account gets `history_id` from the watch response and `initial_sync_completed_at = null`. For a returning account only `watch_expiration` changes: the stored `history_id` and `initial_sync_completed_at` are kept, because the watch response's `historyId` is current and would skip every change since the last sync.
 5. Issue the JWT (1.8).
 6. Respond `302` to `${FRONTEND_URL}/auth/callback#token=<JWT>`. The token travels in the URL fragment, which browsers do not send to servers.
 7. If the account has no completed initial sync, schedule one to run **after** the redirect is sent, using the platform's background-work facility (`waitUntil` from `@vercel/functions`; without it the function may be frozen once the response is sent). A failing initial sync never changes the redirect.
@@ -389,7 +392,7 @@ Processing is idempotent: re-delivered or duplicated notifications upsert the sa
 
 Not an HTTP endpoint. Runs for an account with no completed initial sync: scheduled after a successful callback (3.1) whenever the account has none.
 
-1. Call `users.watch` with `topicName = GOOGLE_PUBSUB_TOPIC` and no label filter. Save `gmail_sync_state` with `history_id` = the response `historyId`, `watch_expiration` from the response `expiration`, and `initial_sync_completed_at = null`.
+1. If the account already has a `gmail_sync_state` row (sign-in started the watch, 3.1 step 4), skip this step. Otherwise call `users.watch` with `topicName = GOOGLE_PUBSUB_TOPIC` and no label filter. Save `gmail_sync_state` with `history_id` = the response `historyId`, `watch_expiration` from the response `expiration`, and `initial_sync_completed_at = null`.
 2. List the 50 most recent INBOX messages (`labelIds=INBOX`, `maxResults=50`).
 3. Fetch each with `format=full` (concurrency 10) and upsert them atomically.
 4. Set `initial_sync_completed_at` to now.
@@ -631,6 +634,7 @@ The seven units in `build_sequence.md` are built in order. Because the schema ma
 - Supabase Auth, Storage, Realtime
 - The IMAP provider (`src/providers/imap`) and a cron route (`api/cron`, `src/cron`). The scaffold has these directories, but nothing here specifies them.
 - **Known gap: watch renewal and catch-up sync.** Gmail stops pushing 7 days after a watch starts unless `users.watch` is called again, and it may drop notifications. With no renewal job, push sync silently stops about 7 days after sign-in; after that, rows are refreshed only when `GET /api/v1/messages` is called.
+- **Known gap: token columns are NOT NULL, but the account row is created first.** 4.2 declares `access_token_enc`, `refresh_token_enc` and `token_expires_at` `not null`, yet `AccountStore.upsertGoogleAccount` (3.1 step 4) creates the `gmail_accounts` row before `TokenStore.saveTokens` writes the tokens, and has no tokens to supply. Against the live schema that insert fails. Undecided: make the three columns nullable (a row without tokens reads as "no tokens", which the Supabase stores already handle), or pass the encrypted tokens into the account upsert. The schema session should not finalise 4.2 until this is settled.
 - **Known gap: Row Level Security.** Supabase exposes `public` tables through its Data API by default, so until RLS (or a non-exposed schema) is added, every table is reachable with the project's public anon key. The Google tokens are ciphertext (1.9), so they leak nothing usable without `ENCRYPTION_KEY`, but message content and user emails are readable. The service-role key the app uses bypasses RLS and is unaffected.
 
 ## 8. Decisions

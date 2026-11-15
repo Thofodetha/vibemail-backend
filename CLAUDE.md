@@ -12,7 +12,7 @@ Node 20, TypeScript in strict mode, `googleapis`, the Supabase JS client, Jest w
 
 ## State of the repo
 
-Early implementation. Build unit 1 is done (`src/types/provider.ts`, with its conformance test in `tests/unit/provider.test.ts`); everything else under `api/` and `src/` is still empty. The other real content is two planning documents and the toolchain config. Read these before writing code:
+Early implementation. Build unit 1 is done (`src/types/provider.ts`, with its conformance test in `tests/unit/provider.test.ts`). Unit 2 is partly built against fakes: the Gmail auth layer (`src/providers/gmail/`: consent URL, code exchange, refresh, the `tokens` listener, watch, `completeSignIn`), AES-256-GCM token encryption and the stores (`src/db/`, with in-memory and Supabase versions). Still to do in unit 2: JWT, the state cookie and the callback's error mapping. The Supabase stores are untested until the schema merges. `api/` is still empty. The other real content is two planning documents and the toolchain config. Read these before writing code:
 
 - `CONTRACT.md` — endpoint contracts with typed errors, the stored-message data model (each field mapped to its Gmail API source), acceptance criteria, and the build rules.
 - `build_sequence.md` — seven build units that must be done in order; a unit is finished only when its one-line verify step passes. `CONTRACT.md` §6.3 maps each unit to acceptance criteria.
@@ -78,7 +78,7 @@ Verify steps that need the live database run twice: against fakes first (server 
 
 ## Decisions and open items
 
-`CONTRACT.md` v0.5 matches this file, and its section 8 records ten decisions the owner confirmed on 2026-11-11 (webhook token auth, JWT in a URL fragment, list reads Gmail live, single-origin CORS, app-level AES-256-GCM, the two test scripts, ownership of `tests/` and root config, plain-SQL migrations, parallel schema drafting). Do not change them without the owner's say-so.
+`CONTRACT.md` v0.6 matches this file, and its section 8 records ten decisions the owner confirmed on 2026-11-11 (webhook token auth, JWT in a URL fragment, list reads Gmail live, single-origin CORS, app-level AES-256-GCM, the two test scripts, ownership of `tests/` and root config, plain-SQL migrations, parallel schema drafting). Do not change them without the owner's say-so.
 
 Still undecided: `src/providers/imap` and `api/cron` exist in the scaffold but nothing specifies them; watch renewal and Row Level Security are known gaps (`CONTRACT.md` §7). Ask before building on any of these.
 

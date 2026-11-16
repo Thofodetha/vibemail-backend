@@ -1,4 +1,10 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "rewrites": [{ "source": "/webhook/gmail", "destination": "/api/webhook/gmail" }]
+  "rewrites": [
+    {
+      "source": "/webhook/gmail",
+      "destination": "/api/webhook/gmail"
+    }
+  ],
+  "outputDirectory": "."
 }
